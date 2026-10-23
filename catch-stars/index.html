@@ -1,0 +1,163 @@
+!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Лови звёзды</title>
+<style>
+html,body{margin:0;height:100%;background:#0b0f2a;color:#fff;font-family:system-ui,sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+.panel{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;background:rgba(8,10,40,.75);padding:20px}
+.panel[hidden]{display:none}
+h1{font-size:clamp(2rem,7vw,3.4rem);margin:0}
+p{margin:0;max-width:32rem;line-height:1.5;opacity:.92}
+button{font:600 1.1rem system-ui,sans-serif;border:0;border-radius:999px;padding:14px 34px;background:#ffd23f;color:#2b1b00;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+#hud{position:fixed;top:12px;left:0;right:0;display:flex;justify-content:space-between;padding:0 18px;font-size:1.6rem;font-weight:700;pointer-events:none;text-shadow:0 2px 6px #000}
+#note{font-size:.9rem;opacity:.75}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted hidden></video>
+<div id="hud"><span>⭐ <b id="sc">0</b></span><span>⏱ <b id="tm">60</b></span></div>
+ 
+<div class="panel" id="start">
+  <h1>⭐ Лови звёзды</h1>
+  <p>С неба падают звёзды (+10) и фрукты (+5). Ловите их рукой перед камерой. Бомбы 💣 ловить нельзя (−15). У вас 60 секунд.</p>
+  <p id="note">Видео и звук остаются в браузере и никуда не отправляются. Без камеры можно играть мышью или пальцем.</p>
+  <button id="go">Играть</button>
+</div>
+ 
+<div class="panel" id="end" hidden>
+  <h1 id="res"></h1>
+  <p id="best"></p>
+  <button id="again">Ещё раз</button>
+</div>
+ 
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const cv=$('c'),cx=cv.getContext('2d'),vid=$('v');
+let W,H;function fit(){W=cv.width=innerWidth;H=cv.height=innerHeight}fit();addEventListener('resize',fit);
+ 
+const GOOD=[['⭐',10],['⭐',10],['🍎',5],['🍊',5],['🍓',5],['🍇',5]];
+let state='idle',score=0,left=60,items=[],fx=[],pts=[],cam=false,stream=null,hands=null,last=0,spawnT=0,flash=0,mouse=null;
+ 
+/* мышь или палец как запасное управление */
+cv.addEventListener('pointermove',e=>{mouse={x:e.clientX,y:e.clientY}});
+cv.addEventListener('pointerdown',e=>{mouse={x:e.clientX,y:e.clientY}});
+cv.addEventListener('pointerup',e=>{if(e.pointerType==='touch')mouse=null});
+cv.addEventListener('pointerleave',()=>{mouse=null});
+ 
+/* точки руки: кончики пальцев и центр ладони, пересчитанные в экранные координаты */
+function onHands(r){
+  pts=[];
+  if(!r.multiHandLandmarks||!vid.videoWidth)return;
+  const vw=vid.videoWidth,vh=vid.videoHeight,s=Math.max(W/vw,H/vh),dx=(W-vw*s)/2,dy=(H-vh*s)/2;
+  for(const h of r.multiHandLandmarks)for(const i of [8])pts.push({x:W-(dx+h[i].x*vw*s),y:dy+h[i].y*vh*s});
+}
+ 
+async function startCam(){
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:640,height:480}});
+    vid.srcObject=stream;await vid.play();
+    hands=new Hands({locateFile:f=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/'+f});
+    hands.setOptions({maxNumHands:2,modelComplexity:0,minDetectionConfidence:.6,minTrackingConfidence:.5});
+    hands.onResults(onHands);
+    cam=true;
+    (async function feed(){if(!cam)return;try{await hands.send({image:vid})}catch(e){}requestAnimationFrame(feed)})();
+  }catch(e){
+    stopCam();
+    $('note').textContent='Камера или модель рук недоступны. Играйте мышью или пальцем по экрану.';
+  }
+}
+function stopCam(){cam=false;pts=[];if(stream)stream.getTracks().forEach(t=>t.stop());stream=null}
+ 
+async function play(){
+  $('start').hidden=true;$('end').hidden=true;
+  if(!stream&&typeof Hands!=='undefined')await startCam();
+  score=0;left=60;items=[];fx=[];spawnT=0;state='play';last=performance.now();
+}
+function finish(){
+  state='end';
+  let best=0;
+  try{best=+localStorage.getItem('stars-best')||0;if(score>best){best=score;localStorage.setItem('stars-best',best)}}catch(e){best=Math.max(best,score)}
+  $('res').textContent='Счёт: '+score;
+  $('best').textContent='Лучший результат на этом устройстве: '+best;
+  $('end').hidden=false;
+}
+ 
+function spawn(){
+  const bomb=Math.random()<.14,g=GOOD[Math.random()*GOOD.length|0],t=60-left;
+  items.push({e:bomb?'💣':g[0],v:bomb?-15:g[1],x:40+Math.random()*(W-80),y:-40,vy:130+Math.random()*110+t*3,r:Math.min(W,H)*.04+18,rot:Math.random()*6});
+}
+function burst(x,y,v){
+  fx.push({x,y,vx:0,vy:-70,t:.9,txt:(v>0?'+':'')+v,c:v>0?'#ffe066':'#ff5c5c'});
+  for(let i=0;i<10;i++)fx.push({x,y,vx:(Math.random()-.5)*320,vy:(Math.random()-.5)*320,t:.5,c:v>0?'#fff3a0':'#ff8a8a'});
+}
+ 
+function bg(){
+  if(cam&&vid.videoWidth){
+    const vw=vid.videoWidth,vh=vid.videoHeight,s=Math.max(W/vw,H/vh);
+    cx.save();cx.translate(W,0);cx.scale(-1,1);
+    cx.drawImage(vid,(W-vw*s)/2,(H-vh*s)/2,vw*s,vh*s);cx.restore();
+    cx.fillStyle='rgba(5,8,40,.35)';cx.fillRect(0,0,W,H);
+  }else{
+    const g=cx.createLinearGradient(0,0,0,H);g.addColorStop(0,'#0b0f2a');g.addColorStop(1,'#2b1a5a');
+    cx.fillStyle=g;cx.fillRect(0,0,W,H);
+  }
+}
+ 
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  bg();
+  const hit=mouse?[mouse,...pts]:pts;
+ 
+  if(state==='play'){
+    left-=dt;
+    if(left<=0){left=0;finish()}
+    spawnT-=dt;
+    if(spawnT<=0){spawn();spawnT=Math.max(.35,.9-(60-left)*.01)}
+    for(const it of items){
+      it.y+=it.vy*dt;it.rot+=dt*2;
+      for(const p of hit)if(!it.dead&&Math.hypot(p.x-it.x,p.y-it.y)<it.r+46){
+        it.dead=true;score=Math.max(0,score+it.v);burst(it.x,it.y,it.v);
+        if(it.v<0)flash=.5;
+      }
+    }
+    items=items.filter(it=>!it.dead&&it.y<H+60);
+  }
+ 
+  cx.textAlign='center';cx.textBaseline='middle';
+  for(const it of items){
+    cx.save();cx.translate(it.x,it.y);cx.rotate(Math.sin(it.rot)*.4);
+    cx.font=(it.r*2)+'px serif';cx.fillText(it.e,0,0);cx.restore();
+  }
+  for(const p of fx){
+    p.t-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;
+    if(p.txt){cx.font='700 28px system-ui';cx.fillStyle=p.c;cx.globalAlpha=Math.max(0,p.t/.9);cx.fillText(p.txt,p.x,p.y)}
+    else{cx.fillStyle=p.c;cx.globalAlpha=Math.max(0,p.t/.5);cx.fillRect(p.x,p.y,5,5)}
+    cx.globalAlpha=1;
+  }
+  fx=fx.filter(p=>p.t>0);
+ 
+  /* маркеры, показывающие, где программа видит руку */
+  cx.strokeStyle='rgba(255,255,255,.7)';cx.lineWidth=3;
+  for(const p of hit){cx.beginPath();cx.arc(p.x,p.y,18,0,6.283);cx.stroke()}
+ 
+  if(flash>0){cx.fillStyle='rgba(255,40,40,'+flash+')';cx.fillRect(0,0,W,H);flash-=dt}
+ 
+  $('sc').textContent=score;$('tm').textContent=Math.ceil(left);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+ 
+$('go').onclick=play;$('again').onclick=play;
+addEventListener('keydown',e=>{
+  if(e.key==='Escape'){state='idle';stopCam();items=[];$('end').hidden=true;$('start').hidden=false}
+});
+</script>
+</body>
+</html>
